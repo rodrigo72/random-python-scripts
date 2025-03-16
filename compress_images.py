@@ -7,6 +7,21 @@ from tqdm import tqdm
 import stat
 from multiprocessing import Pool, cpu_count
 
+"""
+Processing Images: 100%|█| 49811/49811 [1:15:39<00:00]
+
+Compression Report:
+Total Files Processed: 63028
+Successfully Compressed: 49807
+Failed to Compress: 4
+Skipped (Not Eligible): 13217
+
+Size Statistics:
+Total Original Size: 164386.99 MB
+Total Compressed Size: 71694.50 MB
+Total Size Reduction: 92692.49 MB (56.39%)
+"""
+
 
 def should_compress(image_path,
                     size_threshold=500*1024,
