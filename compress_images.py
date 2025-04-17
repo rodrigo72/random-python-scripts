@@ -2,7 +2,7 @@ import os
 import shutil
 import uuid
 import tempfile
-from PIL import Image
+from PIL import Image, ImageOps
 from tqdm import tqdm
 import stat
 from multiprocessing import Pool, cpu_count
@@ -73,8 +73,8 @@ def compress_image(image_path, quality=85, backup=True, debug=False):
         original_mode = os.stat(image_path).st_mode
 
         with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img)
             ext = os.path.splitext(image_path)[1].lower()
-            original_ext = ext
             save_args = {}
 
             if ext in ['.tiff']:
