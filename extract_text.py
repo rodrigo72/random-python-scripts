@@ -18,21 +18,25 @@ HEADER_THRESHOLD = 50  # Pixels from top to ignore
 FOOTER_THRESHOLD = 50  # Pixels from bottom to ignore
 
 
-def fix_hyphenated_line_breaks(text):
+def fix_hyphenated_line_breaks(text: str) -> str:
     if not text:
         return text
-    text = text.replace('\u00AD', '-')  # soft hyphen -> normal hyphen
-    text = re.sub(r'-\s*\n\s*-', '-', text)
-    pattern_newline = re.compile(r'(?P<left>[\p{L}\p{N}])-\s*\n\s*(?P<right>\p{Ll})', flags=re.UNICODE)
-    pattern_space = re.compile(r'(?P<left>[\p{L}\p{N}])-\s+(?P<right>\p{Ll})', flags=re.UNICODE)
-    while True:
-        new_text, n1 = pattern_newline.subn(r'\g<left>\g<right>', text)
-        new_text, n2 = pattern_space.subn(r'\g<left>\g<right>', new_text)
-        total = n1 + n2
-        text = new_text
-        if total == 0:
-            break
+    text = text.replace('\u00AD', '-')
+    text = re.sub(r'(?<=\w)-\s*\n\s*-(?=\w)', '-', text)
+    def join_if_hyphenation(m: re.Match) -> str:
+        left = m.group('left')
+        right = m.group('right')
+        if right.isalpha() and right.islower():
+            return left + right
+        return left + '-' + right
+    text = re.sub(
+        r'(?P<left>\w)-\s*\n\s*(?P<right>\w)',
+        join_if_hyphenation,
+        text
+    )
+    text = re.sub(r'(\w)-\s+(\w)', r'\1-\2', text)
     return text
+
 
 def normalize_text(text):
     text = unicodedata.normalize('NFKC', text)
@@ -138,6 +142,15 @@ def remove_citation_numbers(text):
     text = re.sub(pattern, r'\1', text)
     return re.sub(r'\n\d+ +', r'\n', text)
 
+
+def handle_quotes(text):
+    text = re.sub(r'(?<=[“‘])\s+', r'', text)
+    text = re.sub(r'\s+(?=[”’])', r'', text)
+    text = re.sub(r'\" *(.*?) *\"', r'"\1"', text)
+    text = re.sub(r'\*?([\"\'‘’“”])\*?', r'\1', text)
+    return text
+
+
 def clean_pipeline(text):
     if not text: return ""
     text = normalize_text(text)
@@ -148,6 +161,7 @@ def clean_pipeline(text):
     # text = convert_numbers(text)
     text = handle_sentence_ends_and_pauses(text)
     text = remove_artifacts(text)
+    text = handle_quotes(text)
     text = re.sub(r' +', ' ', text)
     text = re.sub(r'\n\n+', '\n\n', text)
     text = text.strip()
@@ -516,3 +530,8 @@ if __name__ == "__main__":
     file_path = sys.argv[1]
     output_base = "output"
     result_dir = extract(file_path, output_base)
+
+"""
+TODO: 
+
+"""
