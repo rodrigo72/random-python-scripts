@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from functools import wraps
 from functools import lru_cache
 import pyperclip
+from collections import Counter
+import math
 
 
 def profile_method(func):
@@ -27,7 +29,7 @@ def profile_method(func):
 @dataclass
 class ReaderConfig:
     """Configuration for the speed reader"""
-    wpm: int = 300
+    wpm: int = 350
     window_width: int = 1000
     window_height: int = 600
     save_interval_ms: int = 5000
@@ -117,9 +119,14 @@ class SpeedReader:
     LENGTH_MULTIPLIER_CONFIG = {
         'min_chars': 1,
         'min_mult': 0.9,
-        'slope': 0.075,
-        'exponent': 1.15
+        'slope': 0.070,
+        'exponent': 1.14
     }
+
+    # Frequency-based timing adjustments
+    FREQ_MULTIPLIER_SCALE = 0.03   # how strongly rarity increases delay (tuneable)
+    FREQ_MULTIPLIER_MAX = 1.2     # clamp multiplier to avoid huge slowdowns
+    FREQ_MIN_COUNT = 1             # avoid division by zero (treated as very rare)
     
     def __init__(self, text, config=None, file_path=None):
         self.config = config or ReaderConfig()
@@ -131,6 +138,8 @@ class SpeedReader:
         self._words = None
         self._word_delays = None
         self._cumulative_times = None
+        self._word_counts = None
+        self._total_words = None
         
         # State
         self.paused = False
@@ -178,6 +187,20 @@ class SpeedReader:
         if self._cumulative_times is None:
             self._cumulative_times = self._compute_cumulative_times()
         return self._cumulative_times
+    
+    @property
+    def word_counts(self):
+        """Lazy compute cleaned, lowercased word frequency counts for this text."""
+        if self._word_counts is None:
+            # Normalize words to alphanumeric-only lowercased tokens for counting
+            cleaned_tokens = [
+                re.sub(r'[^\w]', '', w).lower() for w in self.words if w.strip()
+            ]
+            # Filter out empty strings from punctuation-only tokens
+            cleaned_tokens = [t for t in cleaned_tokens if t]
+            self._word_counts = Counter(cleaned_tokens)
+            self._total_words = sum(self._word_counts.values()) or 1
+        return self._word_counts
     
     def _invalidate_timing_cache(self):
         self._word_delays = None
@@ -260,6 +283,17 @@ class SpeedReader:
             return cfg['min_mult']
         return cfg['min_mult'] + (base_length ** cfg['exponent']) * cfg['slope']
     
+    def _frequency_multiplier(self, token: str) -> float:
+        """Return frequency-based multiplier for a cleaned, lowercased token."""
+        if not token:
+            return 1.0
+        count = self.word_counts.get(token, 0)
+        count = max(count, self.FREQ_MIN_COUNT)
+        total = self._total_words or len(self.words) or 1
+        rarity_score = math.log10(total / count)
+        freq_mult = 1.0 + self.FREQ_MULTIPLIER_SCALE * rarity_score
+        return min(max(1.0, freq_mult), self.FREQ_MULTIPLIER_MAX)
+
     def get_delay(self, word=None):
         """Calculate delay in milliseconds based on WPM and word length"""
         base_delay = 60000 / self.wpm
@@ -280,9 +314,13 @@ class SpeedReader:
         
         for char, mult in self.SPECIAL_MULTIPLIERS.items():
             if char in word:
-                return int(base_delay * (multiplier + mult))
-    
-        return int(base_delay * multiplier)
+                punct_mult = multiplier + mult
+                freq_mult = self._frequency_multiplier(clean_word.lower())
+                return int(base_delay * punct_mult * freq_mult)
+
+        freq_mult = self._frequency_multiplier(clean_word.lower())
+        final_delay = int(base_delay * multiplier * freq_mult)
+        return final_delay
     
     @lru_cache(maxsize=1000)
     def find_orp(self, word): 
@@ -350,6 +388,16 @@ class SpeedReader:
                 index -= 1
             return max(index + 1, 0) if index > 0 else 0
         return 0
+    
+    def effective_wpm_from_remaining(self) -> int:
+        """Estimate WPM implied by remaining_time / remaining_words (rounded)."""
+        # If at or past end
+        if not self.words or self.current_index >= len(self.words) - 1:
+            return 0
+        remaining_words = len(self.words) - self.current_index
+        remaining_ms = max(1, self.cumulative_times[self.current_index])  # avoid div0
+        eff = (remaining_words * 60000) / remaining_ms
+        return int(eff)
     
     def get_context(self):
         """Get the current sentence/paragraph with caching"""
@@ -443,13 +491,13 @@ class SpeedReader:
             total_time_ms = 0
         
         time_str = self._format_time(total_time_ms / 1000)
-        
+        eff_wpm = self.effective_wpm_from_remaining()
         # Draw progress info
         info_y = 20
         len_words = len(self.words)
         info_texts = [
             f"Word {self.current_index + 1}/{len_words} ({((self.current_index + 1) * 100 + len_words // 2) // len_words}%)",
-            f"{self.wpm} WPM",
+            f"Base: {self.wpm} WPM · Effective: {eff_wpm} WPM",
             f"Time left: {time_str}"
         ]
         
@@ -763,7 +811,7 @@ def main():
         return
     
     config = ReaderConfig(
-        wpm=300,
+        wpm=350,
         window_width=1000,
         window_height=600
     )
