@@ -7,7 +7,8 @@ import hashlib
 import time
 from dataclasses import dataclass
 from functools import wraps
-import numpy as np
+from functools import lru_cache
+import pyperclip
 
 
 def profile_method(func):
@@ -17,7 +18,7 @@ def profile_method(func):
         start = time.perf_counter()
         result = func(*args, **kwargs)
         elapsed = time.perf_counter() - start
-        if elapsed > 0.016:  # warn if method takes >1 frame at 60fps
+        if elapsed > 0.016:  # Warn if method takes >1 frame at 60fps
             print(f"[PROFILE] {func.__name__} took {elapsed*1000:.2f}ms")
         return result
     return wrapper
@@ -35,7 +36,7 @@ class ReaderConfig:
     font_size_small: int = 24
     
     # Color scheme
-    bg_color: tuple = (20, 20, 20)
+    bg_color: tuple = (45, 42, 46)
     text_color: tuple = (220, 220, 220)
     highlight_color: tuple = (255, 80, 80)
     dim_color: tuple = (120, 120, 120)
@@ -93,34 +94,31 @@ class PositionManager:
 
 
 class SpeedReader:
-    # Constants
     DEFAULT_WPM = 300
     MIN_WPM = 50
     MAX_WPM = 1000
     SKIP_WORDS = 10
     WPM_ADJUST_SMALL = 10
     WPM_ADJUST_LARGE = 50
-
     SPECIAL_MULTIPLIERS = {
+        '?': 1.55,
         '.': 1.25,
+        '!': 1.0,
+        ';': 0.6,
         '—': 0.5,
+        ':': 0.6,
         '–': 0.5,
         ',': 0.15,
-        ';': 0.3,
-        '?': 1.55,
-        '!': 1,
-        ':': 0.4,
         '"': 0.1,
         "'": 0.1,
         "‘": 0.1,
         "“": 0.1
     }
-
     LENGTH_MULTIPLIER_CONFIG = {
         'min_chars': 1,
-        'max_chars': 14,
         'min_mult': 0.9,
-        'max_mult': 1.7    
+        'slope': 0.075,
+        'exponent': 1.15
     }
     
     def __init__(self, text, config=None, file_path=None):
@@ -133,7 +131,6 @@ class SpeedReader:
         self._words = None
         self._word_delays = None
         self._cumulative_times = None
-        self._word_stats = None
         
         # State
         self.paused = False
@@ -182,13 +179,6 @@ class SpeedReader:
             self._cumulative_times = self._compute_cumulative_times()
         return self._cumulative_times
     
-    @property
-    def word_stats(self):
-        """Lazy compute word statistics"""
-        if self._word_stats is None:
-            self._word_stats = self._calculate_word_stats()
-        return self._word_stats
-    
     def _invalidate_timing_cache(self):
         self._word_delays = None
         self._cumulative_times = None
@@ -217,21 +207,13 @@ class SpeedReader:
                 words.append(word)
         return words
     
-    def _calculate_word_stats(self):
-        """Calculate word length statistics"""
-        lengths = [len(re.sub(r'[^\w]', '', w)) for w in self.words]
-        if not lengths:
-            return {'min': 0, 'max': 0, 'avg': 0}
-        
-        return {
-            'min': min(lengths),
-            'max': max(lengths),
-            'avg': sum(lengths) / len(lengths)
-        }
-    
     def _compute_cumulative_times(self):
-        delays = np.array(self.word_delays)
-        return np.flip(np.cumsum(np.flip(delays))).tolist()
+        total = 0
+        cumulative = [0] * len(self.word_delays)
+        for i in reversed(range(len(self.word_delays))):
+            total += self.word_delays[i]
+            cumulative[i] = total
+        return cumulative
     
     def _get_file_hash(self):
         """Generate a hash from the file path for saving position"""
@@ -253,23 +235,30 @@ class SpeedReader:
         """Save current reading position (with threshold check)"""
         if not force and abs(self.current_index - self.last_saved_index) < self.config.save_threshold:
             return
-        
+
         if not self.file_hash:
             return
-        
-        sentence_start = self.get_sentence_start(self.current_index)
+
+        # Ensure we pass a valid index to get_sentence_start()
+        if not self.words:
+            sentence_start = 0
+        else:
+            index_for_save = max(0, min(self.current_index, len(self.words) - 1))
+            sentence_start = self.get_sentence_start(index_for_save)
+
         self.position_manager.queue_update(
-            self.file_hash, 
-            sentence_start, 
+            self.file_hash,
+            sentence_start,
             self.config.position_flush_interval
         )
         self.last_saved_index = self.current_index
 
     def _length_multiplier(self, word_length):
         cfg = self.LENGTH_MULTIPLIER_CONFIG
-        clamped = max(cfg['min_chars'], min(word_length, cfg['max_chars']))
-        t = (clamped - cfg['min_chars']) / (cfg['max_chars'] - cfg['min_chars'])
-        return cfg['min_mult'] + t * (cfg['max_mult'] - cfg['min_mult'])
+        base_length = word_length - cfg['min_chars']
+        if base_length <= 0:
+            return cfg['min_mult']
+        return cfg['min_mult'] + (base_length ** cfg['exponent']) * cfg['slope']
     
     def get_delay(self, word=None):
         """Calculate delay in milliseconds based on WPM and word length"""
@@ -295,25 +284,42 @@ class SpeedReader:
     
         return int(base_delay * multiplier)
     
-    def find_orp(self, word):
+    @lru_cache(maxsize=1000)
+    def find_orp(self, word): 
         """Find Optimal Recognition Point - typically 1/3 into the word"""
-        clean_word = re.sub(r'[^\w]', '', word)
-        if len(clean_word) <= 1:
-            return 0
-        return len(clean_word) // 3
+        alnum_indices = [i for i, char in enumerate(word) if char.isalnum()]
+        
+        clean_len = len(alnum_indices)
+        if clean_len == 0: return 0
+        
+        if clean_len <= 1:
+            target_idx = 0
+        elif clean_len <= 5:
+            target_idx = clean_len // 2
+        else:
+            target_idx = clean_len // 3
+            
+        return alnum_indices[target_idx]
     
     def get_sentence_start(self, index=None):
-        """Get the starting index of the current sentence"""
+        """Get the starting index of the current sentence (defensive: clamps index)."""
         if index is None:
             index = self.current_index
-        
+
+        # If there are no words, return 0 immediately
+        if not self.words:
+            return 0
+
+        # Clamp index to valid range [0, len(self.words)-1]
+        index = max(0, min(index, len(self.words) - 1))
+
         start = index
         while start > 0:
             word = self.words[start - 1]
             if word.endswith(('.', '!', '?', '\n')):
                 break
             start -= 1
-        
+
         return start
     
     def get_next_phrase_start(self):
@@ -386,7 +392,7 @@ class SpeedReader:
     
     @profile_method
     def draw_word(self):
-        """Draw single word with red ORP letter"""
+        """Draw single word with red ORP letter centered on-screen"""
         self.screen.fill(self.config.bg_color)
         
         if self.current_index >= len(self.words):
@@ -408,15 +414,27 @@ class SpeedReader:
         orp_surf = self.get_rendered_word(orp_char, self.config.highlight_color, self.font_large)
         after_surf = self.get_rendered_word(after, self.config.text_color, self.font_large)
         
-        # Calculate position
-        total_width = before_surf.get_width() + orp_surf.get_width() + after_surf.get_width()
-        start_x = (self.width - total_width) // 2
+        # Calculate position so ORP character is centered on screen
+        center_x = self.width // 2
         y = self.height // 2 - 50
+
+        # If ORP character is present, align its center to screen center.
+        # Otherwise fall back to centering the entire word as before.
+        if orp_char:
+            orp_x = center_x - (orp_surf.get_width() // 2)
+            before_x = orp_x - before_surf.get_width()
+            after_x = orp_x + orp_surf.get_width()
+        else:
+            total_width = before_surf.get_width() + orp_surf.get_width() + after_surf.get_width()
+            start_x = (self.width - total_width) // 2
+            before_x = start_x
+            orp_x = start_x + before_surf.get_width()
+            after_x = start_x + before_surf.get_width() + orp_surf.get_width()
         
-        # Draw word
-        self.screen.blit(before_surf, (start_x, y))
-        self.screen.blit(orp_surf, (start_x + before_surf.get_width(), y))
-        self.screen.blit(after_surf, (start_x + before_surf.get_width() + orp_surf.get_width(), y))
+        # Draw word parts
+        self.screen.blit(before_surf, (before_x, y))
+        self.screen.blit(orp_surf, (orp_x, y))
+        self.screen.blit(after_surf, (after_x, y))
         
         # Calculate time remaining
         if self.current_index < len(self.words) - 1:
@@ -428,8 +446,9 @@ class SpeedReader:
         
         # Draw progress info
         info_y = 20
+        len_words = len(self.words)
         info_texts = [
-            f"Word {self.current_index + 1}/{len(self.words)}",
+            f"Word {self.current_index + 1}/{len_words} ({((self.current_index + 1) * 100 + len_words // 2) // len_words}%)",
             f"{self.wpm} WPM",
             f"Time left: {time_str}"
         ]
@@ -447,6 +466,7 @@ class SpeedReader:
         # Draw jump mode indicator
         if self.jump_mode:
             self._draw_jump_indicator()
+
     
     @profile_method
     def draw_context(self):
@@ -482,17 +502,27 @@ class SpeedReader:
             x += word_surf.get_width()
         
         # Draw header
-        header = "PAUSED - Press SPACE to continue (C to copy text)"
+        header = "PAUSED"
         header_surf = self.font_medium.render(header, True, self.config.highlight_color)
         header_rect = header_surf.get_rect(center=(self.width // 2, 40))
         self.screen.blit(header_surf, header_rect)
         
         # Draw controls
-        controls = f"{self.wpm} WPM | <- ->: Skip 10 | +/-: Speed | HOME/END: Start/End | J: Jump % | JJ: Jump word | ESC: Quit"
+        controls = f"{self.wpm} WPM | SPACE: play | <- ->: skip 10 | +/-: speed | HOME/END: start/end | J: jump % | JJ: jump word | C: copy | ESC: quit"
         controls_surf = self.get_rendered_word(controls, self.config.dim_color, self.font_small)
         self.screen.blit(controls_surf, (20, self.height - 40))
         
-        # Draw jump mode indicator
+        # time remaining
+        if self.current_index < len(self.words) - 1:
+            total_time_ms = self.cumulative_times[self.current_index]
+        else:
+            total_time_ms = 0
+        time_str = self._format_time(total_time_ms / 1000)
+        info_text = f"Time left: {time_str}"
+        info_rendered = self.get_rendered_word(info_text, self.config.dim_color, self.font_small)
+        self.screen.blit(info_rendered, (20, self.height - 65))
+        
+        # Draw jump mode indicator  # TODO: FIX - jump mode works as shortcut, but no visual thing appears
         if self.jump_mode:
             self._draw_jump_indicator()
     
@@ -502,9 +532,15 @@ class SpeedReader:
             jump_text = f"Jump to: {self.jump_input}% (press ENTER)"
         else:
             jump_text = f"Jump to word: {self.jump_input} (press ENTER)"
-        
+
         jump_surf = self.font_medium.render(jump_text, True, self.config.highlight_color)
         jump_rect = jump_surf.get_rect(center=(self.width // 2, self.height - 100))
+
+        # Draw a semi-opaque background rectangle for readability
+        bg_surf = pygame.Surface((jump_rect.width + 16, jump_rect.height + 8), pygame.SRCALPHA)
+        bg_surf.fill((0, 0, 0, 50))  # RGBA: black at 160 alpha
+        self.screen.blit(bg_surf, (jump_rect.left - 8, jump_rect.top - 4))
+
         self.screen.blit(jump_surf, jump_rect)
     
     def _format_time(self, total_seconds):
@@ -551,6 +587,12 @@ class SpeedReader:
             self.jump_input = ""
             return True
         else:
+            # Clamp index to valid bounds before saving
+            if self.words:
+                self.current_index = max(0, min(self.current_index, len(self.words) - 1))
+            else:
+                self.current_index = 0
+
             self.save_position(force=True)
             return False
     
@@ -567,12 +609,14 @@ class SpeedReader:
         
         elif event.key == pygame.K_BACKSPACE:
             self.jump_input = self.jump_input[:-1]
+            self._cached_context = None
             return True
         
         elif event.unicode.isdigit():
             max_digits = 3 if self.jump_type == 'percent' else 8
             if len(self.jump_input) < max_digits:
                 self.jump_input += event.unicode
+                self._cached_context = None
             return True
         
         return True
@@ -612,6 +656,9 @@ class SpeedReader:
             self.jump_mode = True
             self.jump_type = 'percent'
             self.jump_input = ""
+            self.paused = True
+            self.show_context = True
+            self._cached_context = None
         
         elif event.key == pygame.K_HOME:
             self.current_index = 0
@@ -646,13 +693,16 @@ class SpeedReader:
             self._invalidate_timing_cache()
         
         return True
-    
+        
     def _copy_context(self):
         """Copy current paragraph to clipboard"""
         start, end = self.get_context()
         text_to_copy = ' '.join(self.words[start:end])
-        pygame.scrap.put(pygame.SCRAP_TEXT, text_to_copy.encode('utf-8'))
-        print("Text copied to clipboard!")
+        try:
+            pyperclip.copy(text_to_copy)
+            print(f"Copied {len(text_to_copy)} characters to clipboard")
+        except Exception as e:
+            print(f"Clipboard error: {e}")
     
     def run(self):
         """Main loop"""
@@ -712,7 +762,6 @@ def main():
         print(f"Error: Could not find file at {txt_path}")
         return
     
-    # Optional: Load custom config
     config = ReaderConfig(
         wpm=300,
         window_width=1000,
