@@ -5,12 +5,12 @@ import datetime
 import subprocess
 import platform
 import sys
+import random
 
 INPUT_FOLDER = r'C:\Users\rodri\Desktop\phone_audios'
-OUTPUT_FOLDER = 'output'
-HISTORY_FILE = 'processed_history.txt'
+OUTPUT_FOLDER = r'C:\Users\rodri\Desktop\python_scripts\audio\output'
+HISTORY_FILE = r'C:\Users\rodri\Desktop\python_scripts\audio\processed_history.txt'
 AUDIO_EXTS = ('.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a')
-
 
 def load_history() -> Set[str]:
     if not os.path.exists(HISTORY_FILE):
@@ -75,6 +75,7 @@ def format_time(seconds: float) -> str:
 def main():
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)    
     audio_paths = get_audio_paths(INPUT_FOLDER)
+    random.shuffle(audio_paths)  
     
     if not audio_paths:
         print(f"No audio files found in '{INPUT_FOLDER}' folder.")
@@ -85,7 +86,8 @@ def main():
     
     if history:
         print(f"Found {len(history)} previously processed files.")
-        choice = input("History found! [S]kip processed, [P]rocess all anyway, or [R]eset history? ").strip().lower()
+        # Defaulting Enter to 's' (Skip) here as it's the standard 'Yes' for this prompt
+        choice = input("History found! [S]kip processed (Enter), [P]rocess all, or [R]eset? ").strip().lower() or 's'
         if choice == 's':
             skip_mode = True
         elif choice == 'r':
@@ -101,7 +103,7 @@ def main():
 
         print(f"\n{'='*60}")
         print(f"File {idx}/{len(audio_paths)}: {audio_path}")
-        print("Commands: [z] Yes, [x] No, [q] Quit Entirely")
+        print("Commands: [Enter/z] Yes, [x] No, [q] Quit Entirely")
         print(f"{'='*60}")
         
         try:
@@ -113,7 +115,8 @@ def main():
             continue
         
         while True:
-            listen = input("\nListen to this audio? (z/x/q): ").strip().lower()
+            # Using 'or z' to catch empty Enter key
+            listen = input("\nListen to this audio? (z/x/q): ").strip().lower() or 'z'
             if listen == 'q': sys.exit("Exiting script...")
             if listen in ['z', 'x']: break
         
@@ -122,7 +125,7 @@ def main():
             input("Press Enter when ready to continue...")
         
         while True:
-            cut_audio = input("Cut this audio? (z/x/q): ").strip().lower()
+            cut_audio = input("Cut this audio? (z/x/q): ").strip().lower() or 'z'
             if cut_audio == 'q': sys.exit("Exiting script...")
             if cut_audio in ['z', 'x']: break
         
@@ -147,7 +150,7 @@ def main():
                     print(f"Invalid range! Must be within 0 and {duration_sec:.2f}s")
                     continue
                 
-                name_choice = input("Use automatic name? (z/x/q): ").strip().lower()
+                name_choice = input("Use automatic name? (z/x/q): ").strip().lower() or 'z'
                 if name_choice == 'q': sys.exit("Exiting script...")
                 
                 if name_choice == 'z':
@@ -158,13 +161,18 @@ def main():
                 
                 output_path = os.path.join(OUTPUT_FOLDER, output_name)
                 print(f"Saving to: {output_path}...")
-                
-                cut_clip = audio_clip.subclipped(start_sec, end_sec)
-                cut_clip.write_audiofile(output_path, logger=None)
-                cut_clip.close()
+
+                ext = os.path.splitext(output_path)[1].lower()
+                codec = 'aac' if ext == '.aac' else None
+
+                with AudioFileClip(audio_path) as fresh_clip:
+                    end_sec = min(end_sec, duration_sec - 0.05)
+                    cut_clip = fresh_clip.subclipped(start_sec, end_sec)
+                    cut_clip.write_audiofile(output_path, codec=codec, logger=None)
+                    cut_clip.close()
                 print("✓ Saved.")
 
-                another = input("\nAnother cut from THIS file? (z/x/q): ").strip().lower()
+                another = input("\nAnother cut from THIS file? (z/x/q): ").strip().lower() or 'z'
                 if another == 'q': sys.exit("Exiting script...")
                 if another == 'x': break
 
